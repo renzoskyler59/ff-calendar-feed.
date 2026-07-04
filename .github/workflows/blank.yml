@@ -1,0 +1,67 @@
+name: Cập nhật lịch kinh tế ForexFactory
+
+# Chạy mỗi 15 phút — dư sức nằm dưới giới hạn 2 request/5 phút của ForexFactory,
+# vì GitHub Actions dùng dải IP chia sẻ cực lớn (không như vài proxy công cộng
+# cố định IP mà hàng ngàn app khác cũng đang dùng chung).
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}   # cho phép bấm "Run workflow" để chạy thủ công ngay lập tức
+
+permissions:
+  contents: write
+
+jobs:
+  update-calendar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tải lịch kinh tế từ ForexFactory
+        run: |
+          URLS=(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
+          )
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          OK=0
+          for URL in "${URLS[@]}"; do
+            echo "=================================================="
+            echo "Đang thử: $URL"
+            HTTP_CODE=$(curl -sS --max-time 20 -A "$UA" -H "Accept: application/json" \
+              -o ff_calendar.tmp -w "%{http_code}" "$URL" || echo "000")
+            echo "Mã HTTP trả về: $HTTP_CODE"
+            echo "--- 500 ký tự đầu của phản hồi (để chẩn đoán) ---"
+            head -c 500 ff_calendar.tmp 2>/dev/null || echo "(rỗng)"
+            echo ""
+            echo "--- hết đoạn xem trước ---"
+
+            if [ "$HTTP_CODE" = "200" ] && node -e "
+              const d = require('./ff_calendar.tmp');
+              if (!Array.isArray(d) || !d.length) process.exit(1);
+            " 2>/dev/null; then
+              mv ff_calendar.tmp ff_calendar.json
+              OK=1
+              echo "✅ Lấy dữ liệu thành công từ $URL"
+              break
+            else
+              echo "❌ Nguồn này thất bại (mã HTTP không phải 200, hoặc nội dung không phải JSON mảng hợp lệ)"
+            fi
+          done
+
+          if [ "$OK" -ne 1 ]; then
+            echo "::error::Cả 2 nguồn ForexFactory đều thất bại trong lần chạy này. Xem đoạn xem trước phản hồi ở trên để biết nguyên nhân (VD: trang chặn bot, trang 'Request Denied', lỗi mạng...)."
+            exit 1
+          fi
+
+      - name: Commit nếu có thay đổi
+        run: |
+          if git diff --quiet -- ff_calendar.json 2>/dev/null && [ -f ff_calendar.json ]; then
+            echo "Không có gì thay đổi."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add ff_calendar.json
+            git commit -m "Cập nhật lịch kinh tế ForexFactory [tự động]"
+            git push
+          fi
